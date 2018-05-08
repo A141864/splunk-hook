@@ -49,6 +49,8 @@ func (s *Hook) Fire(entry *logrus.Entry) error {
 		combinedFields["logLevel"] = "debug"
 	case logrus.InfoLevel:
 		combinedFields["logLevel"] = "info"
+	case logrus.WarnLevel:
+		combinedFields["logLevel"] = "warning"
 	case logrus.ErrorLevel:
 		combinedFields["logLevel"] = "error"
 	case logrus.FatalLevel:
@@ -81,6 +83,9 @@ func (s *Hook) Levels() []logrus.Level {
 		logrus.ErrorLevel,
 		logrus.FatalLevel,
 		logrus.PanicLevel,
+		logrus.InfoLevel,
+		logrus.DebugLevel,
+		logrus.WarnLevel,
 	}
 }
 

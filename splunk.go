@@ -61,11 +61,11 @@ func (s *Hook) Fire(entry *logrus.Entry) error {
 		combinedFields["logLevel"] = "info"
 	}
 
-	combinedFields["message"] = entry.Message
-
 	for k, v := range s.DefaultValues {
 		combinedFields[k] = v
 	}
+
+	combinedFields["message"] = entry.Message
 
 	if log, err = json.MarshalIndent(combinedFields, "", "\t"); err != nil {
 		print(err)

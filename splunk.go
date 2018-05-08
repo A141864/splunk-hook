@@ -2,135 +2,164 @@ package splunk
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
+	"crypto/tls"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
-	"strconv"
+	"os"
 	"time"
 
 	"github.com/sirupsen/logrus"
 )
 
-const method = "POST"
-const contentType = "application/json"
-const resource = "/api/logs"
+// Event ...
+type Event struct {
+	Time       int64       `json:"time" binding:"required"`       // epoch time in seconds
+	Host       string      `json:"host" binding:"required"`       // hostname
+	Source     string      `json:"source" binding:"required"`     // app name
+	SourceType string      `json:"sourcetype" binding:"required"` // Splunk bucket to group logs in
+	Index      string      `json:"index" binding:"required"`      // idk what it does..
+	Event      interface{} `json:"event" binding:"required"`      // throw any useful key/val pairs here
+}
 
-// LogAnalyticsHook to send logs via the Telegram API.
-type LogAnalyticsHook struct {
-	CustomerID  string
-	SharedKey   string
-	apiEndpoint string
-	LogType     string
-	c           *http.Client
-	async       bool
+// Hook ...
+type Hook struct {
+	HTTPClient    *http.Client // HTTP client used to communicate with the API
+	URL           string
+	Hostname      string
+	Token         string
+	Source        string //Default source
+	SourceType    string //Default source type
+	Index         string //Default index
+	DefaultValues logrus.Fields
 }
 
 // Config defines a method for additional configuration when instantiating TelegramHook
-type Config func(*LogAnalyticsHook)
-
-// NewLogAnalyticsHook ...
-func NewLogAnalyticsHook(CustomerID, SharedKey, LogType string, config ...Config) (*LogAnalyticsHook, error) {
-	client := &http.Client{}
-	return NewLogAnalyticsHookWithClient(CustomerID, SharedKey, LogType, client, config...)
-}
-
-// NewLogAnalyticsHookWithClient ...
-func NewLogAnalyticsHookWithClient(CustomerID, SharedKey, LogType string, client *http.Client, config ...Config) (*LogAnalyticsHook, error) {
-	apiEndpoint := fmt.Sprintf(
-		"https://%s.ods.opinsights.azure.com/api/logs?api-version=2016-04-01",
-		CustomerID,
-	)
-
-	h := LogAnalyticsHook{
-		CustomerID:  CustomerID,
-		c:           client,
-		SharedKey:   SharedKey,
-		apiEndpoint: apiEndpoint,
-		async:       false,
-	}
-
-	for _, c := range config {
-		c(&h)
-	}
-
-	// TODO: Validate token
-
-	return &h, nil
-}
-
-// BuildSignature ...
-func BuildSignature(customerID, sharedKey, date, contentLength, method, contentType, resource string) (string, error) {
-
-	var keyBytes []byte
-	var err error
-
-	n := "\n"
-	xHeaders := "x-ms-date:" + date
-	signature := method + n + contentLength + n + contentType + n + xHeaders + n + resource
-	bytesToHash := []byte(signature)
-
-	if keyBytes, err = base64.StdEncoding.DecodeString(sharedKey); err != nil {
-		fmt.Println("decode error:", err)
-		return "", err
-	}
-
-	mac := hmac.New(sha256.New, keyBytes)
-	mac.Write(bytesToHash)
-	sum := mac.Sum(nil)
-	sumEncoded := base64.StdEncoding.EncodeToString(sum)
-	authorization := "SharedKey " + customerID + ":" + sumEncoded
-	return authorization, nil
-}
-
-// PostLog ...
-func (hook *LogAnalyticsHook) PostLog(messageJSONBytes []byte) error {
-
-	date := time.Now().UTC().Format(time.RFC1123)
-	length := strconv.Itoa(len(messageJSONBytes))
-	signature, err := BuildSignature(hook.CustomerID, hook.SharedKey, date, length, method, contentType, resource)
-
-	req, err := http.NewRequest(method, hook.apiEndpoint, bytes.NewReader(messageJSONBytes))
-
-	if err != nil {
-		return err
-	}
-
-	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Authorization", signature)
-	req.Header.Add("Log-Type", hook.LogType)
-	req.Header.Add("x-ms-date", date)
-
-	if res, err := hook.c.Do(req); err != nil {
-		print("Failed with status code: " + string(res.StatusCode))
-		return err
-	}
-
-	return nil
-}
+type Config func(*Hook)
 
 // Fire ...
-func (hook *LogAnalyticsHook) Fire(entry *logrus.Entry) error {
-
+func (s *Hook) Fire(entry *logrus.Entry) error {
 	var log []byte
 	var err error
 
-	if log, err = json.MarshalIndent(entry.Data, "", "\t"); err != nil {
+	combinedFields := entry.Data
+
+	switch entry.Level {
+	case logrus.DebugLevel:
+		combinedFields["logLevel"] = "debug"
+	case logrus.InfoLevel:
+		combinedFields["logLevel"] = "info"
+	case logrus.ErrorLevel:
+		combinedFields["logLevel"] = "error"
+	case logrus.FatalLevel:
+		combinedFields["logLevel"] = "fatal"
+	case logrus.PanicLevel:
+		combinedFields["logLevel"] = "panic"
+	default:
+		combinedFields["logLevel"] = "info"
+	}
+
+	combinedFields["message"] = entry.Message
+
+	for k, v := range s.DefaultValues {
+		combinedFields[k] = v
+	}
+
+	if log, err = json.MarshalIndent(combinedFields, "", "\t"); err != nil {
 		print(err)
 		return err
 	}
 
-	hook.PostLog(log)
+	// print(string(log))
+	s.Log(log)
 	return nil
 }
 
 // Levels ...
-func (hook *LogAnalyticsHook) Levels() []logrus.Level {
+func (s *Hook) Levels() []logrus.Level {
 	return []logrus.Level{
 		logrus.ErrorLevel,
 		logrus.FatalLevel,
 		logrus.PanicLevel,
 	}
+}
+
+// NewHook ...
+func NewHook(URL string, Token string, Source string, SourceType string, Index string, defaultFields logrus.Fields) *Hook {
+
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	httpClient := &http.Client{Timeout: time.Second * 20, Transport: tr}
+
+	hostname, _ := os.Hostname()
+	c := Hook{
+		HTTPClient:    httpClient,
+		URL:           URL,
+		Hostname:      hostname,
+		Token:         Token,
+		Source:        Source,
+		SourceType:    SourceType,
+		Index:         Index,
+		DefaultValues: defaultFields,
+	}
+
+	return &c
+}
+
+// NewEvent ...
+func (s *Hook) NewEvent(fields string, source string, sourcetype string, index string) *Event {
+
+	e := &Event{
+		Time:       time.Now().Unix(),
+		Host:       s.Hostname,
+		Source:     source,
+		SourceType: sourcetype,
+		Index:      index,
+		Event:      fields,
+	}
+	return e
+}
+
+// Log ...
+func (s *Hook) Log(fields interface{}) error {
+
+	f := string(fields.([]byte))
+	log := s.NewEvent(f, s.Source, s.SourceType, s.Index)
+	return s.LogEvent(log)
+}
+
+// LogEvent ...
+func (s *Hook) LogEvent(e *Event) error {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	return s.doRequest(bytes.NewBuffer(b))
+}
+
+func (s *Hook) doRequest(b *bytes.Buffer) error {
+	// make new request
+	url := s.URL
+	req, err := http.NewRequest("POST", url, b)
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Splunk "+s.Token)
+
+	// receive response
+	res, err := s.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+
+	// If statusCode is not good, return error string
+	switch res.StatusCode {
+	case 200:
+		return nil
+	default:
+		// Turn response into string and return it
+		buf := new(bytes.Buffer)
+		buf.ReadFrom(res.Body)
+		responseBody := buf.String()
+		err = errors.New(responseBody)
+
+	}
+	return err
 }
